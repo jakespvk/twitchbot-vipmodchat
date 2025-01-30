@@ -3,7 +3,7 @@ const net = std.net;
 
 const SERVER = "irc.chat.twitch.tv";
 const PORT = 6667;
-const CHANNEL = "#masayoshi";
+const CHANNEL = "#theprimeagen";
 const OAUTH_TOKEN = "oauth:anonymouse";
 const USERNAME = "justinfan12345";
 
