@@ -1,5 +1,36 @@
 const std = @import("std");
 const net = std.net;
+const tuile = @import("tuile");
+
+const ChatUI = struct {
+    allocator: std.mem.Allocator,
+    messages: std.ArrayList([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator) ChatUI {
+        return ChatUI{
+            .allocator = allocator,
+            .messages = std.ArrayList([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *ChatUI) void {
+        for (self.messages.items) |msg| {
+            self.allocator.free(msg);
+        }
+        self.messages.deinit();
+    }
+
+    pub fn addMessage(self: *ChatUI, message: []const u8) !void {
+        try self.messages.append(std.mem.dupe(self.allocator, u8, message));
+    }
+
+    pub fn render(self: *ChatUI, tui: *tuile.Tuile) void {
+        var list = tui.list();
+        for (self.messages.items) |msg| {
+            list.itemText(msg);
+        }
+    }
+};
 
 const SERVER = "irc.chat.twitch.tv";
 const PORT = 6667;
@@ -26,14 +57,12 @@ pub fn formatChat(message: []u8) []u8 {
     return std.fmt.allocPrint(std.heap.page_allocator, "{s}: {s}\n", .{ formatted_username, formatted_message }) catch "";
 }
 
-pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
+pub fn getChat(chat_ui: *ChatUI, tui: *tuile.Tuile) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    var conn = try net.tcpConnectToHost(allocator, SERVER, PORT);
+    var conn = try std.net.tcpConnectToHost(allocator, SERVER, PORT);
     defer conn.close();
-    try stdout.writeAll("Made connection\n\n");
 
     const writer = conn.writer();
     const reader = conn.reader();
@@ -50,27 +79,51 @@ pub fn main() !void {
         if (bytes_read == 0) break;
 
         const message = buffer[0..bytes_read];
-        //try stdout.print("{s}\n", .{message});
+
         if (std.mem.startsWith(u8, message, "PING")) {
             try writer.print("PONG :tmi.twitch.tv\r\n", .{});
         }
 
-        if (std.mem.indexOf(u8, message, "PRIVMSG") != null) {
-            if (std.mem.indexOf(u8, message, "mod=1") != null or
-                std.mem.indexOf(u8, message, "vip=1") != null)
-            {
-                // try stdout.print("{s}\n", .{message});
-                const output_message = formatChat(message);
-
-                if (std.mem.indexOf(u8, output_message, "nightbot") != null or
-                    std.mem.indexOf(u8, output_message, "Cheer") != null or
-                    std.mem.indexOf(u8, output_message, "cheer") != null)
-                {
-                    continue;
-                } else {
-                    try stdout.print("{s}", .{output_message});
-                }
+        if (std.mem.indexOf(u8, message, "PRIVMSG") != null and
+            (std.mem.indexOf(u8, message, "mod=1") != null or
+            std.mem.indexOf(u8, message, "vip=1") != null))
+        {
+            const output_message = formatChat(message);
+            if (output_message.len > 0) {
+                tui.scheduleTask(struct {
+                    fn task(ctx: *anyopaque) void {
+                        const chat = @as(*ChatUI, @ptrCast(ctx));
+                        chat.addMessage(output_message) catch return;
+                    }
+                }.task, &chat_ui);
             }
         }
     }
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    var tui = try tuile.Tuile.init(.{});
+    defer tui.deinit();
+
+    var chat_ui = ChatUI.init(allocator);
+    defer chat_ui.deinit();
+
+    try tui.add(
+        tuile.block(
+            .{
+                .border = tuile.Border.all(),
+                .border_type = .rounded,
+                .layout = .{ .flex = 1 },
+            },
+            chat_ui.render(&tui),
+        ),
+    );
+
+    // Spawn a thread to listen for chat messages
+    _ = try std.Thread.spawn(.{}, getChat, .{ &chat_ui, &tui });
+
+    try tui.run(); // Properly run the Tuile event loop
 }
